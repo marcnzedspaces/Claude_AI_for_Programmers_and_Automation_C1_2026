@@ -1,54 +1,44 @@
-# dataclass gives us a simple immutable result object for returning generated response data.
 from dataclasses import dataclass
+from time import perf_counter
 
-# Repository responsible for retrieving order data from the application's data source.
-from app.repositories.order_repository import OrderRepository
-
-# Pydantic request model describing the input needed to generate a customer response.
-from app.schemas.ai import GenerateResponseRequest
-
-# Service responsible for asking Claude to generate the actual draft response.
-from app.services.response_service import ResponseService
-
-# GenerateResponseService now retrieves approved FAQ context as well as orders.
 from app.repositories.faq_repository import FAQRepository
+from app.repositories.order_repository import OrderRepository
+from app.schemas.ai import GenerateResponseRequest
+from app.services.response_service import ResponseService
 
 
 @dataclass(frozen=True)
 class GenerateResponseResult:
-    draft_response: str         # Final draft generated for the customer.
-    order_id_used: str | None   # Order ID actually used as context, or None if no order was found/used.
-    faq_ids_used: list[str]     # Record which approved FAQ IDs were actually supplied to Claude.
-    model: str                  # Claude model that produced the response.
-    input_tokens: int           # Number of tokens Claude processed as input.
-    output_tokens: int          # Number of tokens Claude generated as output.
+    draft_response: str
+    order_id_used: str | None
+    faq_ids_used: list[str]
+    model: str
+    input_tokens: int
+    output_tokens: int
+    latency_ms: int
 
 
 class GenerateResponseService:
-    # This service coordinates order lookup and AI response generation.
     def __init__(
         self,
         *,
         response_service: ResponseService,
         order_repository: OrderRepository,
-        faq_repository: FAQRepository,  # Repository used to resolve caller-supplied FAQ IDs to approved records.
+        faq_repository: FAQRepository,
     ) -> None:
-        self.response_service = response_service    # Store the AI response-generation dependency.
-        self.order_repository = order_repository  # Store the repository used to retrieve trusted order data.
-        self.faq_repository = faq_repository      # Save the repository dependency for use during generation.
+        self.response_service = response_service
+        self.order_repository = order_repository
+        self.faq_repository = faq_repository
 
     async def generate(
         self,
         request: GenerateResponseRequest,
     ) -> GenerateResponseResult:
-        order_context = None    # Start with no order context because order information is optional.
+        order_context = None
 
-        # Only attempt an order lookup when both customer_id and order_id were supplied.
         if request.order_id and request.customer_id:
-            # Retrieve the specific order while also ensuring it belongs to the given customer.
             order_context = (
-                await self.order_repository
-                .get_order_for_customer(
+                await self.order_repository.get_order_for_customer(
                     request.customer_id,
                     request.order_id,
                 )
@@ -58,22 +48,20 @@ class GenerateResponseService:
             request.faq_ids
         )
 
-        # Ask the response service to generate the draft using the customer message
-        # plus trusted order data retrieved by our application, if available.
-        claude_result = (
-            await self.response_service
-            .generate_draft(
-                request.customer_message,
-                order_context=order_context,
-                faq_context=faq_context,
-            )
+        started = perf_counter()
+
+        claude_result = await self.response_service.generate_draft(
+            request.customer_message,
+            order_context=order_context,
+            faq_context=faq_context,
         )
 
-        # Convert the Claude/service result into the result shape expected by the API layer.
-        return GenerateResponseResult(
-            draft_response=claude_result.text,  # Generated customer-facing draft.
+        latency_ms = int(
+            (perf_counter() - started) * 1000
+        )
 
-            # Record which order was actually used, if any.
+        return GenerateResponseResult(
+            draft_response=claude_result.text,
             order_id_used=(
                 order_context.order_id
                 if order_context
@@ -83,7 +71,8 @@ class GenerateResponseService:
                 faq.faq_id
                 for faq in faq_context
             ],
-            model=claude_result.model,                      # Preserve model information for visibility/debugging.
-            input_tokens=claude_result.input_tokens,        # Preserve token usage for monitoring and cost awareness.
-            output_tokens=claude_result.output_tokens,      # Preserve generated token usage as part of the result metadata.
+            model=claude_result.model,
+            input_tokens=claude_result.input_tokens,
+            output_tokens=claude_result.output_tokens,
+            latency_ms=latency_ms,
         )
