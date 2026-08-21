@@ -1,173 +1,114 @@
-# FastAPI's APIRouter lets us group related API endpoints together.
-from fastapi import APIRouter
+from time import perf_counter
 
-# System prompt used specifically for the summarisation endpoint.
-from app.prompts.summarise import SUMMARISE_SYSTEM_PROMPT
+from fastapi import APIRouter, Request
 
+from app.database import get_database
 from app.repositories.faq_repository import FAQRepository
-
-# Pydantic request/response models used by the AI endpoints.
+from app.repositories.order_repository import OrderRepository
+from app.repositories.usage_repository import UsageRepository
 from app.schemas.ai import (
     AnalyseRequest,
     AnalyseResponse,
     GenerateResponseRequest,
     GenerateResponseResponse,
     ResponseContextUsed,
-    SummariseRequest,
-    SummariseResponse,
 )
-
-# Shared usage schema used to expose Claude model/token information in responses.
-from app.schemas.usage import AIUsage
-
-# Database dependency used to obtain the application's MongoDB/database connection.
-from app.database import get_database
-
-# Repository responsible for retrieving trusted order data from the database.
-from app.repositories.order_repository import OrderRepository
-
-# Application service responsible for analysing customer-support tickets.
+from app.schemas.usage import AIOperation, AIUsage
 from app.services.analysis_service import AnalysisService
-
-# Low-level Claude integration service responsible for communicating with Anthropic.
 from app.services.claude_service import ClaudeService
-
-# Service responsible for generating a customer-facing response using Claude.
+from app.services.generate_response_service import (
+    GenerateResponseService,
+)
 from app.services.response_service import ResponseService
-
-# Workflow service that coordinates order retrieval and AI response generation.
-from app.services.generate_response_service import GenerateResponseService
+from app.services.usage_service import UsageService
 
 
-# Create a router for AI-related endpoints.
-# The "ai" tag groups these endpoints together in FastAPI's /docs interface.
 router = APIRouter(tags=["ai"])
 
 
-# ------------------------------------------------------------
-# SUMMARISE ENDPOINT
-# ------------------------------------------------------------
+@router.post("/analyse", response_model=AnalyseResponse)
+async def analyse_ticket(
+    request: AnalyseRequest,
+    http_request: Request,
+) -> AnalyseResponse:
+    database = get_database()
+    claude_service = ClaudeService()
+    analysis_service = AnalysisService(claude_service)
+    usage_service = UsageService(
+        UsageRepository(database)
+    )
 
-# Register a POST /summarise endpoint and declare the expected response shape.
-@router.post(
-    "/summarise",
-    response_model=SummariseResponse,
-)
-async def summarise_text(
-    request: SummariseRequest,      # FastAPI/Pydantic validates the incoming JSON as a SummariseRequest.
-) -> SummariseResponse:
-    claude_service = ClaudeService()    # Create a Claude client/service for this request.
+    started = perf_counter()
 
     try:
-        # Send the user's text to Claude using the summarisation system prompt.
-        result = await claude_service.generate_text(
-            request.text,
-            system=SUMMARISE_SYSTEM_PROMPT,
-            max_tokens=150,
-        )
+        result = await analysis_service.analyse(request.message)
     finally:
-        # Always close the Claude client, even if the API call fails.
         await claude_service.close()
 
-    # Convert the internal ClaudeTextResult into the API response model.
-    return SummariseResponse(
-        summary=result.text,
+    latency_ms = int((perf_counter() - started) * 1000)
+
+    usage = AIUsage(
         model=result.model,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
+        latency_ms=latency_ms,
     )
 
+    await usage_service.safe_record(
+        request_id=http_request.state.request_id,
+        operation=AIOperation.TICKET_ANALYSIS,
+        usage=usage,
+    )
 
-# ------------------------------------------------------------
-# ANALYSE ENDPOINT
-# ------------------------------------------------------------
-
-# Register a POST /analyse endpoint for structured ticket analysis.
-@router.post(
-    "/analyse",
-    response_model=AnalyseResponse,
-)
-async def analyse_ticket(
-    request: AnalyseRequest,        # Validate the incoming request using the AnalyseRequest schema.
-) -> AnalyseResponse:
-    claude_service = ClaudeService()    # Create the reusable Claude integration service.
-    analyse_service = AnalysisService(claude_service)   # Create the ticket-analysis business service and inject ClaudeService into it.
-
-    try:
-        # Analyse the customer-support message and return structured output.
-        result = await analyse_service.analyse(
-            request.message
-        )
-    finally:
-        await claude_service.close()    # Ensure network resources held by the Claude client are released.
-
-    # Build the public API response from the structured analysis and usage metadata.
     return AnalyseResponse(
-        analysis=result.data,   # result.data is the validated structured TicketAnalysis object.
-
-        # Expose model and token usage separately from the analysis itself.
-        usage=AIUsage(
-            model=result.model,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-        ),
+        analysis=result.data,
+        usage=usage,
     )
 
 
-# ------------------------------------------------------------
-# GENERATE RESPONSE ENDPOINT
-# ------------------------------------------------------------
-
-# Register a POST /generate-response endpoint.
 @router.post(
     "/generate-response",
     response_model=GenerateResponseResponse,
 )
 async def generate_response(
-    # Validate the incoming customer message and optional order identifiers.
     request: GenerateResponseRequest,
+    http_request: Request,
 ) -> GenerateResponseResponse:
-    # Obtain the application's database connection/dependency.
-    # The route does not perform MongoDB queries directly.
     database = get_database()
-
-    # Create the low-level Claude integration service.
     claude_service = ClaudeService()
+    usage_service = UsageService(
+        UsageRepository(database)
+    )
 
-    # Build the application workflow and inject all of its dependencies.
     service = GenerateResponseService(
-        response_service=ResponseService(
-            claude_service
-        ),
-        order_repository=OrderRepository(
-            database
-        ),
-        faq_repository=FAQRepository(
-            database
-        ),
+        response_service=ResponseService(claude_service),
+        order_repository=OrderRepository(database),
+        faq_repository=FAQRepository(database),
     )
 
     try:
-        result = await service.generate(request)    # Coordinate optional order lookup plus AI response generation.
+        result = await service.generate(request)
     finally:
-        await claude_service.close()        # Close the per-request Claude client even when generation raises an error.
+        await claude_service.close()
 
-    # Convert the workflow result into the API's public response shape.
+    usage = AIUsage(
+        model=result.model,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        latency_ms=result.latency_ms,
+    )
+
+    await usage_service.safe_record(
+        request_id=http_request.state.request_id,
+        operation=AIOperation.RESPONSE_GENERATION,
+        usage=usage,
+    )
+
     return GenerateResponseResponse(
-
-        # Customer-facing draft generated by Claude.
         draft_response=result.draft_response,
-
-        # Tell the caller which trusted order record was actually used, if any.
         context_used=ResponseContextUsed(
             order_id=result.order_id_used,
             faq_ids=result.faq_ids_used,
         ),
-
-        # Include Claude model and token usage for visibility and monitoring.
-        usage=AIUsage(
-            model=result.model,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-        ),
+        usage=usage,
     )
