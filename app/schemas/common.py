@@ -5,6 +5,8 @@ from pydantic import BaseModel, ConfigDict
 
 
 class StrictModel(BaseModel):
+    # Base model for application-facing data contracts.
+
     model_config = ConfigDict(
         extra="forbid",
         str_strip_whitespace=True,
@@ -21,14 +23,6 @@ class TicketCategory(str, Enum):
     GENERAL = "general"
     OTHER = "other"
 
-class TicketStatus(str, Enum):
-    NEW = "new"
-    ANALYSED = "analysed"
-    PROCESSED = "processed"
-    ESCALATED = "escalated"
-    NEEDS_HUMAN_REVIEW = "needs_human_review"
-    PROCESSING_FAILED = "processing_failed"
-    CLOSED = "closed"
 
 class Sentiment(str, Enum):
     POSITIVE = "positive"
@@ -41,6 +35,16 @@ class Priority(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     URGENT = "urgent"
+
+
+class TicketStatus(str, Enum):
+    NEW = "new"
+    ANALYSED = "analysed"
+    PROCESSED = "processed"
+    NEEDS_HUMAN_REVIEW = "needs_human_review"
+    ESCALATED = "escalated"
+    PROCESSING_FAILED = "processing_failed"
+    CLOSED = "closed"
 
 
 class HealthResponse(StrictModel):

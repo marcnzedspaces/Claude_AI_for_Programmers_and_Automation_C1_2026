@@ -9,19 +9,10 @@ from app.schemas.usage import AIUsage
 
 class FAQSource(StrictModel):
     # Approved source data retrieved from MongoDB.
-    faq_id: str = Field(
-        min_length=3,
-        max_length=50,
-    )
+    faq_id: str = Field(min_length=3, max_length=50,)
     category: TicketCategory
-    question: str = Field(
-        min_length=3,
-        max_length=500,
-    )
-    answer: str = Field(
-        min_length=3,
-        max_length=2000,
-    )
+    question: str = Field(min_length=3, max_length=500)
+    answer: str = Field(min_length=3, max_length=2000)
 
 
 class FAQAnswerDecision(StrictModel):

@@ -9,17 +9,6 @@ from app.schemas.common import (
 from app.schemas.usage import AIUsage
 
 
-class SummariseRequest(StrictModel):
-    text: str = Field(min_length=20, max_length=5000)
-
-
-class SummariseResponse(StrictModel):
-    summary: str
-    model: str
-    input_tokens: int = Field(ge=0)
-    output_tokens: int = Field(ge=0)
-
-
 class AnalyseRequest(StrictModel):
     message: str = Field(min_length=5, max_length=5000)
 
@@ -29,6 +18,7 @@ class TicketAnalysis(StrictModel):
     category: TicketCategory
     sentiment: Sentiment
     priority: Priority
+
     needs_order_lookup: bool
     needs_faq_lookup: bool
     needs_human_review: bool
@@ -84,13 +74,16 @@ class GenerateResponseRequest(StrictModel):
             raise ValueError(
                 "customer_id is required when order_id is provided"
             )
+
         return self
+
 
 class ResponseContextUsed(StrictModel):
     # Make trusted context available to the app for logging and debugging purposes. This is not sent to Claude.
     # Show exactly which trusted context the application used.
     order_id: str | None = None
     faq_ids: list[str] = Field(default_factory=list)
+
 
 class GenerateResponseResponse(StrictModel):
     draft_response: str = Field(

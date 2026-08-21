@@ -2,14 +2,15 @@ from datetime import datetime
 from enum import Enum
 
 from pydantic import Field
+
 from app.schemas.common import StrictModel
 
 # Restrict order status to know app values
 class OrderStatus(str, Enum):
-    DELAYED = "delayed"
     PROCESSING = "processing"
     SHIPPED = "shipped"
     DELIVERED = "delivered"
+    DELAYED = "delayed"
     CANCELLED = "cancelled"
     RETURNED = "returned"
 
