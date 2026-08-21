@@ -3,7 +3,6 @@ from typing import Any
 from app.schemas.order import OrderContext
 
 
-# Projection is an allowlist of fields the repository returns to the app.
 ORDER_CONTEXT_PROJECTION = {
     "_id": 0,
     "order_id": 1,
@@ -15,11 +14,7 @@ ORDER_CONTEXT_PROJECTION = {
 
 
 class OrderRepository:
-    def __init__(
-        self,
-        database: Any,
-    ) -> None:
-        # Repositories own database access; ClaudeService does not.
+    def __init__(self, database: Any) -> None:
         self.collection = database.orders
 
     async def get_order_for_customer(
@@ -27,19 +22,15 @@ class OrderRepository:
         customer_id: str,
         order_id: str,
     ) -> OrderContext | None:
-        # Exercise 01: participants implement the customer-scoped query.
-        # Scope the query to the customer_id and order_id, and apply the projection.
         document = await self.collection.find_one(
             {
                 "customer_id": customer_id,
                 "order_id": order_id,
             },
-            ORDER_CONTEXT_PROJECTION
+            ORDER_CONTEXT_PROJECTION,
         )
 
-        # No matching document found; return None to indicate absence of order.
         if document is None:
             return None
 
-        # Valiidate the db data before the rest of the app uses it. This ensures that the app only works with valid data.
         return OrderContext.model_validate(document)

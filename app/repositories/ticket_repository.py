@@ -1,55 +1,59 @@
 from typing import Any
 
-from pymongo import DESCENDING
+from pymongo import ASCENDING, DESCENDING
 
+from app.schemas.common import TicketCategory, TicketStatus
 from app.schemas.ticket import TicketResponse
 
 
-# Exclude MongoDB's internal _id from application responses.
 TICKET_PROJECTION = {
     "_id": 0,
 }
 
 
 class TicketRepository:
-    def __init__(
-        self,
-        database: Any,
-    ) -> None:
+    def __init__(self, database: Any) -> None:
         self.collection = database.tickets
+
+    async def ensure_indexes(self) -> None:
+        await self.collection.create_index(
+            "ticket_id",
+            unique=True,
+        )
+        await self.collection.create_index(
+            [("customer_id", ASCENDING), ("created_at", DESCENDING)],
+        )
+        await self.collection.create_index(
+            [("status", ASCENDING), ("created_at", DESCENDING)],
+        )
+        await self.collection.create_index(
+            [("analysis.category", ASCENDING), ("created_at", DESCENDING)],
+        )
 
     async def insert(
         self,
         ticket: TicketResponse,
     ) -> TicketResponse:
-        # Store a validated Pydantic model as a MongoDB document.
-        await self.collection.insert_one(
-            ticket.model_dump(
-                mode="python"
-            )
-        )
+        document = ticket.model_dump(mode="python")
+        await self.collection.insert_one(document)
         return ticket
 
     async def replace(
         self,
         ticket: TicketResponse,
     ) -> TicketResponse:
-        # Replace the application-owned ticket by its stable ticket_id.
-        result = (
-            await self.collection.replace_one(
-                {
-                    "ticket_id":
-                        ticket.ticket_id,
-                },
-                ticket.model_dump(
-                    mode="python"
-                ),
-            )
+        document = ticket.model_dump(mode="python")
+
+        result = await self.collection.replace_one(
+            {
+                "ticket_id": ticket.ticket_id,
+            },
+            document,
         )
 
         if result.matched_count != 1:
             raise RuntimeError(
-                "Ticket no longer exists."
+                f"Ticket {ticket.ticket_id} no longer exists."
             )
 
         return ticket
@@ -58,55 +62,46 @@ class TicketRepository:
         self,
         ticket_id: str,
     ) -> TicketResponse | None:
-        document = (
-            await self.collection.find_one(
-                {
-                    "ticket_id":
-                        ticket_id,
-                },
-                TICKET_PROJECTION,
-            )
+        document = await self.collection.find_one(
+            {
+                "ticket_id": ticket_id,
+            },
+            TICKET_PROJECTION,
         )
 
         if document is None:
             return None
 
-        # Validate persisted data when it re-enters the application layer.
-        return TicketResponse.model_validate(
-            document
-        )
+        return TicketResponse.model_validate(document)
 
     async def list(
         self,
         *,
         customer_id: str | None = None,
+        status: TicketStatus | None = None,
+        category: TicketCategory | None = None,
         limit: int = 20,
         skip: int = 0,
-    ) -> tuple[
-        list[TicketResponse],
-        int,
-    ]:
+    ) -> tuple[list[TicketResponse], int]:
         query: dict[str, object] = {}
 
-        # Optional customer filter keeps this method reusable.
         if customer_id:
             query["customer_id"] = customer_id
 
-        total = (
-            await self.collection
-            .count_documents(query)
-        )
+        if status is not None:
+            query["status"] = status.value
 
-        # Newest tickets first, then apply pagination.
+        if category is not None:
+            query["analysis.category"] = category.value
+
+        total = await self.collection.count_documents(query)
+
         cursor = (
             self.collection.find(
                 query,
                 TICKET_PROJECTION,
             )
-            .sort(
-                "created_at",
-                DESCENDING,
-            )
+            .sort("created_at", DESCENDING)
             .skip(skip)
             .limit(limit)
         )
@@ -115,8 +110,7 @@ class TicketRepository:
 
         async for document in cursor:
             items.append(
-                TicketResponse
-                .model_validate(document)
+                TicketResponse.model_validate(document)
             )
 
         return items, total
