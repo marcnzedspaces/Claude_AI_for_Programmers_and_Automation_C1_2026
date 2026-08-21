@@ -6,15 +6,10 @@ def serialize_prompt_payload(
     payload: dict[str, Any],
 ) -> str:
     """
-    This is a small support utility;
-    This helper is for turning application data into a clean JSON string before inserting it into a prompt
+    Serialize application data for inclusion in a prompt.
 
-    Args:
-        payload: The prompt data to serialize.
-
-    Returns:
-        A JSON string representing the serialized prompt data.
-
+    JSON encoding preserves untrusted text as a string value instead of
+    allowing delimiter-like text to become application-created structure.
     """
     return json.dumps(
         payload,

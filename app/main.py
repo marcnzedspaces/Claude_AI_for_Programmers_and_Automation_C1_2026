@@ -1,21 +1,50 @@
-from fastapi import FastAPI
 from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
 from app.api.router import api_router
 from app.config import get_settings
-from app.database import( connect_to_database, close_database)
+from app.core.errors import (
+    register_exception_handlers,
+    request_id_middleware,
+)
+from app.core.logging import (
+    configure_logging,
+    log_event,
+)
+from app.database import (
+    close_database,
+    connect_to_database,
+    get_database,
+)
+from app.repositories.ticket_repository import TicketRepository
+from app.repositories.usage_repository import UsageRepository
+
 
 settings = get_settings()
+configure_logging(settings.log_level)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Open required resources (e.g., database connections) at startup
     await connect_to_database()
 
+    database = get_database()
+
+    await UsageRepository(database).ensure_indexes()
+    await TicketRepository(database).ensure_indexes()
+
+    log_event(
+        "application_ready",
+        environment=settings.app_env,
+        faq_cache_enabled=settings.faq_cache_enabled,
+    )
+
     try:
-        yield  # Control is transferred to the application
+        yield
     finally:
-        # Clean up resources (e.g., close database connections) at shutdown
         await close_database()
+
 
 app = FastAPI(
     title=settings.app_name,
@@ -23,4 +52,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.middleware("http")(request_id_middleware)
+register_exception_handlers(app)
 app.include_router(api_router)

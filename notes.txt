@@ -199,3 +199,7 @@ ToolRegistry
     get_order_status(
         order_id="our_id"
     )
+
+    Claude Code -> .claude
+    Claude API -> FastAPI + AsyncAnthopic
+    Managed agent / Agent runtime
