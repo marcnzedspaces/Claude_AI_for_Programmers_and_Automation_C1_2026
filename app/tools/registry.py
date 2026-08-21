@@ -5,12 +5,8 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.repositories.faq_repository import (
-    FAQRepository,
-)
-from app.repositories.order_repository import (
-    OrderRepository,
-)
+from app.repositories.faq_repository import FAQRepository
+from app.repositories.order_repository import OrderRepository
 from app.schemas.agent import (
     EscalateTicketArgs,
     GetOrderStatusArgs,
@@ -21,9 +17,7 @@ from app.schemas.common import TicketStatus
 from app.schemas.faq import FAQSource
 from app.schemas.order import OrderContext
 from app.schemas.ticket import TicketResponse
-from app.services.ticket_service import (
-    TicketService,
-)
+from app.services.ticket_service import TicketService
 
 
 @dataclass(frozen=True)
@@ -31,94 +25,77 @@ class ToolExecutionResult:
     content: str
     is_error: bool
     summary: str
-    order_context: (
-        OrderContext | None
-    ) = None
-    faq_context: (
-        list[FAQSource] | None
-    ) = None
+    order_context: OrderContext | None = None
+    faq_context: list[FAQSource] | None = None
 
 
 class ToolRegistry:
     def __init__(
         self,
         *,
-        order_repository:
-            OrderRepository,
-        faq_repository:
-            FAQRepository,
-        ticket_service:
-            TicketService,
+        order_repository: OrderRepository,
+        faq_repository: FAQRepository,
+        ticket_service: TicketService,
         customer_id: str,
-        allowed_order_id:
-            str | None,
+        allowed_order_id: str | None,
         ticket_id: str,
     ) -> None:
-        self.order_repository = (
-            order_repository
-        )
-        self.faq_repository = (
-            faq_repository
-        )
-        self.ticket_service = (
-            ticket_service
-        )
+        self.order_repository = order_repository
+        self.faq_repository = faq_repository
+        self.ticket_service = ticket_service
         self.customer_id = customer_id
-        self.allowed_order_id = (
-            allowed_order_id
-        )
+        self.allowed_order_id = allowed_order_id
         self.ticket_id = ticket_id
+        self._seen_calls: set[str] = set()
 
-    def definitions(
-        self,
-    ) -> list[dict[str, Any]]:
+    def definitions(self) -> list[dict[str, Any]]:
         return [
             {
-                "name": (
-                    ToolName
-                    .GET_ORDER_STATUS
-                    .value
-                ),
+                "name": ToolName.GET_ORDER_STATUS.value,
                 "description": (
-                    "Retrieve order status "
-                    "for the order supplied "
-                    "with the current support "
-                    "request."
+                    "Retrieve safe status information for the order ID "
+                    "supplied with the current support request. Use this "
+                    "when the customer asks where their order is, whether "
+                    "it was delivered, or when it is expected. The "
+                    "application independently binds the lookup to the "
+                    "current customer and only permits the request's order "
+                    "ID, so this tool cannot be used to browse other "
+                    "customers or arbitrary order IDs. A successful tool "
+                    "call may still return found=false when the order "
+                    "cannot be verified for the current customer."
                 ),
                 "input_schema": (
-                    GetOrderStatusArgs
-                    .model_json_schema()
+                    GetOrderStatusArgs.model_json_schema()
                 ),
             },
             {
-                "name": (
-                    ToolName.SEARCH_FAQ
-                    .value
-                ),
+                "name": ToolName.SEARCH_FAQ.value,
                 "description": (
-                    "Search approved FAQ "
-                    "knowledge for support "
-                    "policy or guidance."
+                    "Search the application's approved FAQ knowledge for "
+                    "support policy or general guidance. Use this before "
+                    "stating return, billing, delivery-policy, account, "
+                    "or other FAQ facts. The tool is read-only and "
+                    "returns at most three approved FAQ records. It does "
+                    "not provide private order data and it does not "
+                    "perform business actions."
                 ),
-                "input_schema": (
-                    SearchFAQArgs
-                    .model_json_schema()
-                ),
+                "input_schema": SearchFAQArgs.model_json_schema(),
             },
             {
-                "name": (
-                    ToolName
-                    .ESCALATE_TICKET
-                    .value
-                ),
+                "name": ToolName.ESCALATE_TICKET.value,
                 "description": (
-                    "Escalate the current "
-                    "support ticket for "
-                    "human handling."
+                    "Escalate the current support ticket for human "
+                    "handling with a concise reason. Use this for issues "
+                    "that warrant human attention, such as repeated "
+                    "failures, urgent concerns, or situations that cannot "
+                    "be resolved safely with available information. The "
+                    "application binds this action to the current ticket; "
+                    "you cannot choose another ticket. This tool does not "
+                    "issue refunds, payments, cancellations, or other "
+                    "financial/account actions."
                 ),
                 "input_schema": (
-                    EscalateTicketArgs
-                    .model_json_schema()
+                    EscalateTicketArgs.model_json_schema()
                 ),
             },
         ]
@@ -128,116 +105,105 @@ class ToolRegistry:
         tool_name: str,
         raw_input: Any,
     ) -> ToolExecutionResult:
-        allowed = {
+        allowed_names = {
             item.value
             for item in ToolName
         }
 
-        if tool_name not in allowed:
+        if tool_name not in allowed_names:
             return ToolExecutionResult(
                 content=json.dumps(
                     {
-                        "error":
-                            "Tool is not "
-                            "allowlisted."
+                        "error": "Tool is not allowlisted.",
                     }
                 ),
                 is_error=True,
                 summary=(
-                    "Blocked non-"
-                    "allowlisted tool."
+                    "Blocked non-allowlisted tool request."
                 ),
             )
 
-        if (
-            tool_name
-            == ToolName
-            .GET_ORDER_STATUS
-            .value
-        ):
-            return (
-                await self
-                ._get_order_status(
-                    raw_input
-                )
-            )
-
-        if (
-            tool_name
-            == ToolName
-            .SEARCH_FAQ
-            .value
-        ):
-            return (
-                await self._search_faq(
-                    raw_input
-                )
-            )
-
-        return (
-            await self._escalate_ticket(
-                raw_input
-            )
+        fingerprint = json.dumps(
+            {
+                "tool_name": tool_name,
+                "input": raw_input,
+            },
+            sort_keys=True,
+            default=str,
         )
+
+        if fingerprint in self._seen_calls:
+            return ToolExecutionResult(
+                content=json.dumps(
+                    {
+                        "error": (
+                            "Duplicate tool request blocked."
+                        )
+                    }
+                ),
+                is_error=True,
+                summary="Blocked duplicate tool request.",
+            )
+
+        self._seen_calls.add(fingerprint)
+
+        if tool_name == ToolName.GET_ORDER_STATUS.value:
+            return await self._get_order_status(raw_input)
+
+        if tool_name == ToolName.SEARCH_FAQ.value:
+            return await self._search_faq(raw_input)
+
+        return await self._escalate_ticket(raw_input)
 
     async def _get_order_status(
         self,
         raw_input: Any,
     ) -> ToolExecutionResult:
         try:
-            args = (
-                GetOrderStatusArgs
-                .model_validate(
-                    raw_input
-                )
+            args = GetOrderStatusArgs.model_validate(
+                raw_input
             )
         except ValidationError:
-            return (
-                self._invalid_arguments(
-                    ToolName
-                    .GET_ORDER_STATUS
-                )
+            return self._invalid_arguments(
+                ToolName.GET_ORDER_STATUS
             )
 
         if self.allowed_order_id is None:
             return ToolExecutionResult(
                 content=json.dumps(
                     {
-                        "error":
-                            "No order ID was "
-                            "supplied."
+                        "error": (
+                            "No order ID was supplied with "
+                            "the current request."
+                        )
                     }
                 ),
                 is_error=True,
                 summary=(
-                    "Order lookup blocked: "
-                    "no request order ID."
+                    "Blocked order lookup because the request "
+                    "contains no order ID."
                 ),
             )
 
-        if (
-            args.order_id
-            != self.allowed_order_id
-        ):
+        if args.order_id != self.allowed_order_id:
             return ToolExecutionResult(
                 content=json.dumps(
                     {
-                        "error":
-                            "Order ID not "
-                            "permitted for this "
-                            "request."
+                        "error": (
+                            "That order ID is not permitted "
+                            "for this request."
+                        )
                     }
                 ),
                 is_error=True,
                 summary=(
-                    "Blocked different "
+                    "Blocked attempt to switch to a different "
                     "order ID."
                 ),
             )
 
         order = (
-            await self.order_repository
-            .get_order_for_customer(
+            await self.order_repository.get_order_for_customer(
                 self.customer_id,
                 args.order_id,
             )
@@ -248,31 +214,29 @@ class ToolRegistry:
                 content=json.dumps(
                     {
                         "found": False,
+                        "message": (
+                            "No order could be verified for the "
+                            "current customer and supplied order ID."
+                        ),
                     }
                 ),
                 is_error=False,
-                summary=(
-                    "No authorized order "
-                    "was found."
-                ),
+                summary="No authorized order was found.",
             )
 
         return ToolExecutionResult(
             content=json.dumps(
                 {
                     "found": True,
-                    "order":
-                        order.model_dump(
-                            mode="json"
-                        ),
+                    "order": order.model_dump(
+                        mode="json"
+                    ),
                 }
             ),
             is_error=False,
             summary=(
-                f"Verified order "
-                f"{order.order_id} "
-                f"with status "
-                f"{order.status.value}."
+                f"Verified order {order.order_id} "
+                f"with status {order.status.value}."
             ),
             order_context=order,
         )
@@ -282,43 +246,31 @@ class ToolRegistry:
         raw_input: Any,
     ) -> ToolExecutionResult:
         try:
-            args = (
-                SearchFAQArgs
-                .model_validate(
-                    raw_input
-                )
+            args = SearchFAQArgs.model_validate(
+                raw_input
             )
         except ValidationError:
-            return (
-                self._invalid_arguments(
-                    ToolName.SEARCH_FAQ
-                )
+            return self._invalid_arguments(
+                ToolName.SEARCH_FAQ
             )
 
-        results = (
-            await self.faq_repository
-            .search(
-                args.query,
-                limit=3,
-            )
+        results = await self.faq_repository.search(
+            args.query,
+            limit=3,
         )
 
         return ToolExecutionResult(
             content=json.dumps(
                 {
                     "matches": [
-                        item.model_dump(
-                            mode="json"
-                        )
-                        for item
-                        in results
+                        item.model_dump(mode="json")
+                        for item in results
                     ]
                 }
             ),
             is_error=False,
             summary=(
-                "FAQ search returned "
-                f"{len(results)} "
+                f"FAQ search returned {len(results)} "
                 "approved record(s)."
             ),
             faq_context=results,
@@ -329,80 +281,63 @@ class ToolRegistry:
         raw_input: Any,
     ) -> ToolExecutionResult:
         try:
-            args = (
-                EscalateTicketArgs
-                .model_validate(
-                    raw_input
-                )
+            args = EscalateTicketArgs.model_validate(
+                raw_input
             )
         except ValidationError:
-            return (
-                self._invalid_arguments(
-                    ToolName
-                    .ESCALATE_TICKET
-                )
+            return self._invalid_arguments(
+                ToolName.ESCALATE_TICKET
             )
 
-        ticket = (
-            await self.ticket_service
-            .get(self.ticket_id)
+        ticket = await self.ticket_service.get(
+            self.ticket_id
         )
 
         if ticket is None:
             return ToolExecutionResult(
                 content=json.dumps(
                     {
-                        "error":
-                            "Current ticket "
-                            "not found."
+                        "error": "Current ticket was not found.",
                     }
                 ),
                 is_error=True,
-                summary=(
-                    "Escalation failed: "
-                    "ticket missing."
+                summary="Escalation failed: ticket missing.",
+            )
+
+        if ticket.status == TicketStatus.CLOSED:
+            return ToolExecutionResult(
+                content=json.dumps(
+                    {
+                        "error": (
+                            "Closed tickets cannot be escalated."
+                        )
+                    }
                 ),
+                is_error=True,
+                summary="Escalation blocked for closed ticket.",
             )
 
-        updated = (
-            TicketResponse.model_validate(
-                {
-                    **ticket.model_dump(
-                        mode="python"
-                    ),
-                    "status":
-                        TicketStatus
-                        .ESCALATED,
-                    "escalation_reason":
-                        args.reason,
-                    "updated_at":
-                        datetime.now(
-                            timezone.utc
-                        ),
-                }
-            )
+        updated = TicketResponse.model_validate(
+            {
+                **ticket.model_dump(mode="python"),
+                "status": TicketStatus.ESCALATED,
+                "escalation_reason": args.reason,
+                "updated_at": datetime.now(timezone.utc),
+            }
         )
 
-        await self.ticket_service.save(
-            updated
-        )
+        await self.ticket_service.save(updated)
 
         return ToolExecutionResult(
             content=json.dumps(
                 {
                     "success": True,
-                    "ticket_id":
-                        ticket.ticket_id,
-                    "status":
-                        TicketStatus
-                        .ESCALATED.value,
+                    "ticket_id": ticket.ticket_id,
+                    "status": TicketStatus.ESCALATED.value,
                 }
             ),
             is_error=False,
-            summary=(
-                "Current ticket "
-                "escalated."
-            ),
+            summary="Current ticket escalated for human review.",
         )
 
     @staticmethod
@@ -412,15 +347,15 @@ class ToolRegistry:
         return ToolExecutionResult(
             content=json.dumps(
                 {
-                    "error":
-                        "Tool arguments "
-                        "failed validation."
+                    "error": (
+                        "Tool arguments failed application "
+                        "validation."
+                    )
                 }
             ),
             is_error=True,
             summary=(
-                "Invalid arguments "
-                f"blocked for "
+                f"Invalid arguments blocked for "
                 f"{tool_name.value}."
             ),
         )
